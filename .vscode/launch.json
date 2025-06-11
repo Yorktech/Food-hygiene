@@ -1,0 +1,21 @@
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Streamlit App",
+      "type": "python",
+      "request": "launch",
+      "module": "streamlit.cli",
+      "args": [
+        "run",
+        "${workspaceFolder}/demo_app.py"
+      ],
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  ]
+}
