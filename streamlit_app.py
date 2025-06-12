@@ -18,7 +18,7 @@ cluster_zoom_threshold = st.slider("Cluster Zoom Threshold", 10, 20, 15)
 # Fetch + Parse XML on button press
 if st.button("Get Ratings and Map"):
     url = "https://ratings.food.gov.uk/api/open-data-files/FHRS868en-GB.xml"
-    st.write("\U0001F4E6 Downloading and parsing data...")
+    st.write("\U0001F4E6 Downloading and parsing data....")
 
     response = requests.get(url)
     if response.status_code != 200:
