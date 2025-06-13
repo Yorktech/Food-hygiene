@@ -294,26 +294,39 @@ if st.button("Get Ratings and Map"):
             rating_counts = filtered_df['Rating'].value_counts().sort_index()
             
             # Create bar chart using Plotly
-            import plotly.express as px
+            import plotly.graph_objects as go
             
-            fig = px.bar(
-                x=rating_counts.index,
-                y=rating_counts.values,
-                labels={'x': 'Hygiene Rating', 'y': 'Number of Establishments'},
-                color=rating_counts.values,
-                color_continuous_scale=['red', 'orange', 'yellow', 'yellowgreen', 'green', 'darkgreen']
-            )
+            # Create a mapping of ratings to their exact map colors
+            rating_colors = {
+                '0': f'rgb(120,0,0)',    # [120, 0, 0, 180]
+                '1': f'rgb(200,0,0)',    # [200, 0, 0, 180]
+                '2': f'rgb(255,100,0)',  # [255, 100, 0, 180]
+                '3': f'rgb(255,200,0)',  # [255, 200, 0, 180]
+                '4': f'rgb(100,200,0)',  # [100, 200, 0, 180]
+                '5': f'rgb(0,200,0)'     # [0, 200, 0, 180]
+            }
+            
+            # Create the bar chart with exact colors
+            fig = go.Figure(data=[
+                go.Bar(
+                    x=list(rating_counts.index),
+                    y=list(rating_counts.values),
+                    marker_color=[rating_colors[str(rating)] for rating in rating_counts.index]
+                )
+            ])
             
             # Update layout for better appearance
             fig.update_layout(
                 showlegend=False,
                 xaxis_title="Hygiene Rating",
                 yaxis_title="Number of Establishments",
-                coloraxis_showscale=False,
                 height=300,  # Compact height
-                margin=dict(l=0, r=0, t=20, b=0)  # Minimal margins
+                margin=dict(l=0, r=0, t=20, b=0),  # Minimal margins
+                bargap=0.2  # Adjust gap between bars
             )
             
+            st.write("---")
+            st.write("Distribution of Hygiene Ratings in Search Results:")
             st.plotly_chart(fig, use_container_width=True)
             
             # Round coordinates to 3 decimal places for clustering
