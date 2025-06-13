@@ -5,12 +5,40 @@ import pandas as pd
 import pydeck as pdk
 
 st.set_page_config(page_title="FHRS Hygiene Map", layout="wide")
-st.title("\U0001F374 Food Hygiene Ratings by Postcode (UK)")
+st.title("Food Hygiene Ratings by Postcode and Postcode Area (UK)")
 
 # Input
 postcode_input = st.text_input("Enter a UK postcode or postcode area:", "SW1A 1AA")
-st.caption("💡 Enter a full postcode (e.g., SW1A 1AA) or postcode area (e.g., YO1, M1, SW1) to see all establishments in that area")
+st.caption("Enter a full postcode (e.g., SW1A 1AA) or postcode area (e.g., YO1, M1, SW1) to see all establishments in that area")
 min_rating = st.slider("Minimum Rating", 0, 5, 0)
+
+# Initialize session state for establishment types if not exists
+if 'establishment_types' not in st.session_state:
+    st.session_state.establishment_types = []
+
+# Fetch establishment types without triggering full data processing
+if not st.session_state.establishment_types:
+    st.write("Loading establishment types...")
+    url = "https://ratings.food.gov.uk/api/open-data-files/FHRS868en-GB.xml"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            types = set()
+            for est in root.findall(".//EstablishmentDetail"):
+                est_type = est.findtext("BusinessType")
+                if est_type:
+                    types.add(est_type)
+            st.session_state.establishment_types = sorted(list(types))
+    except Exception as e:
+        st.error(f"Failed to load establishment types: {str(e)}")
+        st.session_state.establishment_types = []
+
+# Add establishment type dropdown
+selected_type = st.selectbox(
+    "Select establishment type:",
+    ["All Types"] + st.session_state.establishment_types
+)
 
 # Slider to control zoom threshold for clustering
 cluster_zoom_threshold = st.slider("Cluster Zoom Threshold", 10, 20, 15)
@@ -18,7 +46,8 @@ cluster_zoom_threshold = st.slider("Cluster Zoom Threshold", 10, 20, 15)
 # Fetch + Parse XML on button press
 if st.button("Get Ratings and Map"):
     url = "https://ratings.food.gov.uk/api/open-data-files/FHRS868en-GB.xml"
-    st.write("\U0001F4E6 Downloading and parsing data....")
+    status_message = st.empty()
+    status_message.write(" Downloading and parsing data....")
 
     response = requests.get(url)
     if response.status_code != 200:
@@ -33,6 +62,7 @@ if st.button("Get Ratings and Map"):
             rating = est.findtext("RatingValue")
             address = est.findtext("AddressLine1")
             authority = est.findtext("LocalAuthorityName")
+            business_type = est.findtext("BusinessType")
 
             lat_elem = est.find(".//Geocode/Latitude")
             lon_elem = est.find(".//Geocode/Longitude")
@@ -52,6 +82,7 @@ if st.button("Get Ratings and Map"):
                     "Rating": rating,
                     "Address": address,
                     "Authority": authority,
+                    "BusinessType": business_type,
                     "Latitude": lat_float,
                     "Longitude": lon_float
                 })
@@ -62,14 +93,32 @@ if st.button("Get Ratings and Map"):
         df["PostcodeClean"] = df["Postcode"].str.replace(" ", "").str.upper()
         df = df[df["Rating"].apply(lambda x: x.isdigit() and int(x) >= min_rating)]
 
+        # Filter by establishment type if selected
+        if selected_type != "All Types":
+            df = df[df["BusinessType"] == selected_type]
+
         postcode_cleaned = postcode_input.replace(" ", "").upper()
         
+        # Function to normalize postcode areas
+        def normalize_postcode_area(postcode):
+            try:
+                postcode = postcode.replace(" ", "").upper()
+                # Extract the postcode area (letters + first number)
+                import re
+                match = re.match(r'^([A-Z]{1,2}\d{1,2})', postcode)
+                return match.group(1) if match else None
+            except:
+                return None
+
         # Check if it's a postcode area search (e.g., "YO1") or full postcode
         if len(postcode_cleaned) <= 4:  # Postcode area search
-            # For area search, match against original postcodes with spaces
-            # This way "YO1" matches "YO1 9NA" but not "YO19 4TA"
-            area_pattern = postcode_cleaned + " "  # Add space after area
-            filtered_df = df[df["Postcode"].str.upper().str.startswith(area_pattern)].copy()
+            search_area = normalize_postcode_area(postcode_cleaned)
+            if search_area:
+                # Get normalized areas for all postcodes for comparison
+                df['PostcodeArea'] = df['Postcode'].apply(normalize_postcode_area)
+                filtered_df = df[df['PostcodeArea'] == search_area].copy()
+            else:
+                filtered_df = pd.DataFrame()  # Invalid postcode area
             search_type = "postcode area"
         else:  # Full postcode search
             filtered_df = df[df["PostcodeClean"] == postcode_cleaned].copy()
@@ -90,7 +139,66 @@ if st.button("Get Ratings and Map"):
         filtered_df["Color"] = filtered_df["Rating"].apply(rating_to_color)
 
         if not filtered_df.empty:
+            status_message.empty()
             st.success(f"Found {len(filtered_df)} establishments in {search_type} {postcode_input.upper()}")
+            
+            # Calculate average rating for current search and sub-areas all at once
+            postcode_region = postcode_cleaned[:2].upper()  # Take first two characters of postcode
+            
+            # Re-use the same normalization function for sub-areas
+            region_df = df[df["Postcode"].str.upper().str.startswith(postcode_region)].copy()
+            region_df['SubArea'] = region_df['Postcode'].apply(normalize_postcode_area)
+            region_df['NumericRating'] = pd.to_numeric(region_df['Rating'], errors='coerce')
+            region_df = region_df[region_df['NumericRating'].notna() & 
+                                 region_df['SubArea'].notna()]
+
+            # Calculate and display current search statistics
+            search_ratings = pd.to_numeric(filtered_df['Rating'], errors='coerce')
+            search_ratings = search_ratings[search_ratings.notna()]
+            if not search_ratings.empty:
+                avg_rating = round(search_ratings.mean(), 2)
+                st.info(f"Average hygiene rating for this search: {avg_rating}/5 ({len(search_ratings)} establishments)")
+                
+                # Calculate percentage of failed establishments (rating 0-2)
+                search_ratings_array = search_ratings.to_numpy()
+                failed_count = len(search_ratings_array[search_ratings_array <= 2])
+                fail_percentage = round((failed_count / len(search_ratings_array)) * 100, 1)
+                if fail_percentage > 0:
+                    st.warning(f"{fail_percentage}% of establishments failed hygiene standards in your search")
+                else:
+                    st.success("No establishments failed hygiene standards (rated 0-2)")
+
+            # Calculate and display region statistics
+            if not region_df.empty:
+                region_avg = round(region_df['NumericRating'].mean(), 2)
+                st.info(f"Average hygiene rating for {postcode_region} region: {region_avg}/5 (Total establishments: {len(region_df)})")
+
+                # Calculate sub-area statistics
+                sub_area_stats = []
+                for sub_area, group in region_df.groupby('SubArea'):
+                    if len(group) >= 5:  # Only include areas with at least 5 establishments
+                        stats = {
+                            'sub_area': sub_area,
+                            'average': round(group['NumericRating'].mean(), 2),
+                            'count': len(group)
+                        }
+                        sub_area_stats.append(stats)
+
+                # Display best and worst areas
+                if len(sub_area_stats) >= 2:
+                    st.write("---")
+                    st.write("Across all postcode areas in this region:")
+                    
+                    # Sort by average rating for consistent results in case of ties
+                    sub_area_stats.sort(key=lambda x: (x['average'], x['count']), reverse=True)
+                    best_area = sub_area_stats[0]
+                    worst_area = sub_area_stats[-1]
+                    
+                    st.info(f"Best performing area: {best_area['sub_area']} - Average rating: {best_area['average']}/5 ({best_area['count']} establishments)")
+                    st.info(f"Lowest performing area: {worst_area['sub_area']} - Average rating: {worst_area['average']}/5 ({worst_area['count']} establishments)")
+                elif len(sub_area_stats) == 1:
+                    st.info("Only one valid postcode area found in this region")
+
             st.dataframe(filtered_df[["BusinessName", "Rating", "Address", "Postcode", "Latitude", "Longitude"]])
 
             # Round coordinates to 3 decimal places for clustering
@@ -129,7 +237,7 @@ if st.button("Get Ratings and Map"):
             cluster_centers = []  # Track cluster centers for when zoomed in
             
             for _, cluster in clustered_data.iterrows():
-                if cluster["Count"] > 1:
+                if cluster["Count"] > 1:  # Only create wheel layout for multiple venues
                     center_lat = cluster["Latitude_Rounded"]
                     center_lon = cluster["Longitude_Rounded"]
                     
@@ -173,10 +281,11 @@ if st.button("Get Ratings and Map"):
             connecting_lines_df = pd.DataFrame(connecting_lines)
             cluster_centers_df = pd.DataFrame(cluster_centers)
             
-            # Cluster layer (shows when zoomed out) - sized by number of venues
+            # Cluster layer for multiple venues only (shows when zoomed out)
+            multi_venue_clusters = clustered_data[clustered_data["Count"] > 1].copy()
             cluster_layer = pdk.Layer(
                 "ScatterplotLayer",
-                data=clustered_data,
+                data=multi_venue_clusters,
                 get_position="[Longitude_Rounded, Latitude_Rounded]",
                 get_fill_color="Color",
                 get_radius="Count * 30 + 80",  # Size based on venue count
@@ -191,7 +300,7 @@ if st.button("Get Ratings and Map"):
             # Text layer for cluster counts (only show for multi-venue clusters)
             cluster_text_layer = pdk.Layer(
                 "TextLayer",
-                data=clustered_data[clustered_data["Count"] > 1],
+                data=multi_venue_clusters,
                 get_position="[Longitude_Rounded, Latitude_Rounded]",
                 get_text="Count",
                 get_size=14,
@@ -247,20 +356,18 @@ if st.button("Get Ratings and Map"):
             ) if not cluster_centers_df.empty else None
 
             # Individual venue layer for single venues (shows when zoomed in)
-            single_venues = filtered_df.merge(
-                clustered_data[clustered_data["Count"] == 1][["Latitude_Rounded", "Longitude_Rounded"]], 
-                on=["Latitude_Rounded", "Longitude_Rounded"], 
-                how="inner"
-            )
+            single_venues = clustered_data[clustered_data["Count"] == 1].copy()
+            single_venues["Latitude"] = single_venues["Latitude_Rounded"]
+            single_venues["Longitude"] = single_venues["Longitude_Rounded"]
             
             scatter_layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=single_venues,
                 get_position="[Longitude, Latitude]",
                 get_fill_color="Color",
-                get_radius=80,
-                radius_min_pixels=6,
-                radius_max_pixels=25,
+                get_radius=60,
+                radius_min_pixels=8,
+                radius_max_pixels=15,
                 pickable=True,
                 auto_highlight=True,
                 visible=True,
@@ -280,15 +387,23 @@ if st.button("Get Ratings and Map"):
                 "style": {"backgroundColor": "black", "color": "white", "fontSize": "12px"}
             }
 
-            layers = [cluster_layer, cluster_text_layer, scatter_layer]
+            # Initialize layers list based on what we're showing
+            layers = []
             
-            # Add expanded venue layers when they exist
-            if lines_layer is not None:
-                layers.append(lines_layer)
-            if expanded_layer is not None:
-                layers.append(expanded_layer)
-            if center_points_layer is not None:
-                layers.append(center_points_layer)
+            # Add cluster-related layers for multi-venue locations
+            if not multi_venue_clusters.empty:
+                layers.extend([cluster_layer, cluster_text_layer])
+                
+                # Add expanded venue layers when they exist
+                if lines_layer is not None:
+                    layers.append(lines_layer)
+                if expanded_layer is not None:
+                    layers.append(expanded_layer)
+                if center_points_layer is not None:
+                    layers.append(center_points_layer)
+            
+            # Add single venue layer
+            layers.append(scatter_layer)
 
             st.pydeck_chart(pdk.Deck(
                 map_style="mapbox://styles/mapbox/streets-v12",
@@ -297,6 +412,7 @@ if st.button("Get Ratings and Map"):
                 tooltip=tooltip
             ))
         else:
+            status_message.empty()  # Clear the downloading message
             st.warning("No establishments found for this postcode or rating range.")
 
     st.write("---")
