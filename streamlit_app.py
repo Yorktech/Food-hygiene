@@ -93,32 +93,86 @@ if st.button("Get Ratings and Map"):
         df["PostcodeClean"] = df["Postcode"].str.replace(" ", "").str.upper()
         df = df[df["Rating"].apply(lambda x: x.isdigit() and int(x) >= min_rating)]
 
+        # Calculate national failure rate
+        df['NumericRating'] = pd.to_numeric(df['Rating'], errors='coerce')
+        national_failures = (df['NumericRating'] <= 2).sum()
+        national_total = len(df['NumericRating'])
+        national_fail_percentage = round((national_failures / national_total) * 100, 1) if national_total > 0 else 0
+
         # Filter by establishment type if selected
         if selected_type != "All Types":
             df = df[df["BusinessType"] == selected_type]
 
         postcode_cleaned = postcode_input.replace(" ", "").upper()
         
-        # Function to normalize postcode areas
-        def normalize_postcode_area(postcode):
+        # Function to extract postcode area using string operations
+        def extract_postcode_area(postcode):
             try:
-                postcode = postcode.replace(" ", "").upper()
-                # Extract the postcode area (letters + first number)
-                import re
-                match = re.match(r'^([A-Z]{1,2}\d{1,2})', postcode)
-                return match.group(1) if match else None
+                # Convert to uppercase and split by space if exists
+                postcode = postcode.upper()
+                outward_code = postcode.split()[0] if ' ' in postcode else postcode
+                
+                # Find where the numbers start in the outward code
+                for i, char in enumerate(outward_code):
+                    if char.isdigit():
+                        letters = outward_code[:i]
+                        numbers = outward_code[i:]
+                        return letters, numbers
+                return None, None
             except:
-                return None
+                return None, None
 
-        # Check if it's a postcode area search (e.g., "YO1") or full postcode
-        if len(postcode_cleaned) <= 4:  # Postcode area search
-            search_area = normalize_postcode_area(postcode_cleaned)
-            if search_area:
-                # Get normalized areas for all postcodes for comparison
-                df['PostcodeArea'] = df['Postcode'].apply(normalize_postcode_area)
-                filtered_df = df[df['PostcodeArea'] == search_area].copy()
+        # Function to normalize postcode area
+        def normalize_postcode_area(postcode):
+            letters, numbers = extract_postcode_area(postcode)
+            if letters and numbers:
+                return letters + numbers[0]
+            return None
+
+        # Function to parse postcode area (for YO1 vs YO19 distinction)
+        def parse_postcode_area(postcode):
+            letters, numbers = extract_postcode_area(postcode)
+            if letters and numbers:
+                # Check if it's a double digit district (like YO19)
+                if len(numbers) >= 2 and numbers[1].isdigit():
+                    area = letters + numbers[:2]
+                    return (area, True)
+                else:
+                    # Single digit district (like YO1)
+                    area = letters + numbers[0]
+                    return (area, False)
+            return (None, False)
+
+        # Get the standardized area and whether it's a double-digit district
+        input_area, is_double_digit = parse_postcode_area(postcode_cleaned)
+        
+        # If it's a valid postcode area format or short enough to be one, treat as area search
+        if input_area or len(postcode_cleaned) <= 4:
+            def process_postcode_for_comparison(postcode):
+                area, is_double = parse_postcode_area(postcode)
+                return (area, is_double)
+            
+            # Process all postcodes
+            temp = df['Postcode'].apply(process_postcode_for_comparison)
+            df['ProcessedArea'] = temp.apply(lambda x: x[0])
+            df['IsDoubleDigit'] = temp.apply(lambda x: x[1])
+            
+            if input_area:
+                if is_double_digit:
+                    # For YO19, only match exact YO19 patterns
+                    filtered_df = df[
+                        (df['ProcessedArea'] == input_area) & 
+                        (df['IsDoubleDigit'] == True)
+                    ].copy()
+                else:
+                    # For YO1, match YO1 but not YO19
+                    filtered_df = df[
+                        (df['ProcessedArea'] == input_area) & 
+                        (df['IsDoubleDigit'] == False)
+                    ].copy()
             else:
-                filtered_df = pd.DataFrame()  # Invalid postcode area
+                # For very short inputs (like 'YO'), use prefix matching
+                filtered_df = df[df['PostcodeClean'].str.startswith(postcode_cleaned)].copy()
             search_type = "postcode area"
         else:  # Full postcode search
             filtered_df = df[df["PostcodeClean"] == postcode_cleaned].copy()
@@ -145,12 +199,14 @@ if st.button("Get Ratings and Map"):
             # Calculate average rating for current search and sub-areas all at once
             postcode_region = postcode_cleaned[:2].upper()  # Take first two characters of postcode
             
-            # Re-use the same normalization function for sub-areas
+            # Use parse_postcode_area for sub-areas
             region_df = df[df["Postcode"].str.upper().str.startswith(postcode_region)].copy()
-            region_df['SubArea'] = region_df['Postcode'].apply(normalize_postcode_area)
+            # Get both the area and whether it's double digit
+            area_info = region_df['Postcode'].apply(parse_postcode_area)
+            region_df['SubArea'] = area_info.apply(lambda x: x[0])  # Get just the area part
             region_df['NumericRating'] = pd.to_numeric(region_df['Rating'], errors='coerce')
             region_df = region_df[region_df['NumericRating'].notna() & 
-                                 region_df['SubArea'].notna()]
+                                region_df['SubArea'].notna()]
 
             # Calculate and display current search statistics
             search_ratings = pd.to_numeric(filtered_df['Rating'], errors='coerce')
@@ -163,15 +219,44 @@ if st.button("Get Ratings and Map"):
                 search_ratings_array = search_ratings.to_numpy()
                 failed_count = len(search_ratings_array[search_ratings_array <= 2])
                 fail_percentage = round((failed_count / len(search_ratings_array)) * 100, 1)
+
+                # Calculate area (e.g., YO) failure rate
+                area_postcode = postcode_cleaned[:2].upper()
+                area_df = df[df["Postcode"].str.upper().str.startswith(area_postcode)]
+                area_failures = (area_df['NumericRating'] <= 2).sum()
+                area_total = len(area_df['NumericRating'])
+                area_fail_percentage = round((area_failures / area_total) * 100, 1) if area_total > 0 else 0
+
+                # Compare with national and area averages
                 if fail_percentage > 0:
-                    st.warning(f"{fail_percentage}% of establishments failed hygiene standards in your search")
+                    message_parts = [f"{fail_percentage}% of establishments failed hygiene standards in your search"]
+                    
+                    # Calculate percentage differences
+                    if national_fail_percentage > 0:
+                        nat_diff_percent = round(((fail_percentage - national_fail_percentage) / national_fail_percentage) * 100, 1)
+                        if nat_diff_percent != 0:
+                            comp_text = f"{abs(nat_diff_percent)}% {'higher' if nat_diff_percent > 0 else 'lower'} than the national average of {national_fail_percentage}%"
+                            message_parts.append(comp_text)
+                    
+                    if area_fail_percentage > 0 and area_fail_percentage != fail_percentage:
+                        area_diff_percent = round(((fail_percentage - area_fail_percentage) / area_fail_percentage) * 100, 1)
+                        if area_diff_percent != 0:
+                            comp_text = f"{abs(area_diff_percent)}% {'higher' if area_diff_percent > 0 else 'lower'} than the {area_postcode} region average of {area_fail_percentage}%"
+                            message_parts.append(comp_text)
+                    
+                    message = " - ".join(message_parts)
+                    
+                    if fail_percentage > 4:
+                        st.error(message)
+                    else:
+                        st.warning(message)
                 else:
                     st.success("No establishments failed hygiene standards (rated 0-2)")
 
             # Calculate and display region statistics
             if not region_df.empty:
                 region_avg = round(region_df['NumericRating'].mean(), 2)
-                st.info(f"Average hygiene rating for {postcode_region} region: {region_avg}/5 (Total establishments: {len(region_df)})")
+                st.info(f"Average hygiene rating for Your search in the {postcode_region} region: {region_avg}/5 (Total establishments: {len(region_df)})")
 
                 # Calculate sub-area statistics
                 sub_area_stats = []
@@ -201,6 +286,36 @@ if st.button("Get Ratings and Map"):
 
             st.dataframe(filtered_df[["BusinessName", "Rating", "Address", "Postcode", "Latitude", "Longitude"]])
 
+            # Create bar chart of ratings distribution
+            st.write("---")
+            st.write("Distribution of Hygiene Ratings in Search Results:")
+            
+            # Calculate the count of each rating
+            rating_counts = filtered_df['Rating'].value_counts().sort_index()
+            
+            # Create bar chart using Plotly
+            import plotly.express as px
+            
+            fig = px.bar(
+                x=rating_counts.index,
+                y=rating_counts.values,
+                labels={'x': 'Hygiene Rating', 'y': 'Number of Establishments'},
+                color=rating_counts.values,
+                color_continuous_scale=['red', 'orange', 'yellow', 'yellowgreen', 'green', 'darkgreen']
+            )
+            
+            # Update layout for better appearance
+            fig.update_layout(
+                showlegend=False,
+                xaxis_title="Hygiene Rating",
+                yaxis_title="Number of Establishments",
+                coloraxis_showscale=False,
+                height=300,  # Compact height
+                margin=dict(l=0, r=0, t=20, b=0)  # Minimal margins
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
             # Round coordinates to 3 decimal places for clustering
             filtered_df["Latitude_Rounded"] = filtered_df["Latitude"].round(3)
             filtered_df["Longitude_Rounded"] = filtered_df["Longitude"].round(3)
